@@ -4,7 +4,7 @@ import os
 import re
 
 TEMPLATE_PATH = "templates/template.xlsx"
-EXPORT_PATH = "data/export_all_65c4618b186b4d068cc944cf7f28a71a.xlsx"
+EXPORT_PATH = "data/export_all_c80eb8e5ef3040379d61be5c46e8cd83.xlsx"
 ALIASES_PATH = "data/aliases.xlsx"
 
 
@@ -36,19 +36,10 @@ def to_float_or_zero(v):
 
 
 def strip_lot_qty_suffix(s: str) -> str:
-    # "BL01000001X5 (x4)" -> "BL01000001X5"
     return re.sub(r"\s*\(x\d+\)\s*$", "", str(s).strip())
 
 
 def read_requirements():
-    """
-    Template tab 44807:
-      A: Part number
-      B: Description (template; used for non-missing fallback)
-      C: Qty required (data_only=True uses cached values)
-      E: SN/LOT
-    Returns: list[(primary_pn, template_desc, qty_required, snlot)]
-    """
     wb = load_workbook(TEMPLATE_PATH, keep_vba=True, data_only=True)
     ws = wb["44807"]
 
@@ -81,12 +72,6 @@ def load_export():
 
 
 def load_aliases():
-    """
-    Aliases workbook:
-      First sheet only
-      Column A: PrimaryPartNo
-      Columns B..N: alternates
-    """
     df = pd.read_excel(ALIASES_PATH, sheet_name=0, dtype=str).fillna("")
     aliases = {}
 
@@ -126,55 +111,7 @@ def pick_description_from_export(rows_for_match: pd.DataFrame) -> str:
     return s.value_counts().idxmax()
 
 
-def pick_description_from_combined(export_df: pd.DataFrame, primary_pn: str, aliases: dict) -> str:
-    """
-    Use the missing component PN to pull description from Combined as built (FULL export).
-    Strategy:
-      1) exact ProductNo match on primary + aliases
-      2) base PN startswith match (handles rev differences)
-    """
-    prod = export_df["ProductNo"].astype(str).str.strip()
-    desc = export_df["Component Description"].astype(str).str.strip()
-
-    allowed = aliases.get(primary_pn, [primary_pn])
-
-    def best(mask) -> str:
-        if not mask.any():
-            return ""
-        s = desc[mask]
-        s = s[s != ""]
-        if s.empty:
-            return ""
-        return s.value_counts().idxmax()
-
-    # exact matches first
-    for cand in allowed:
-        c = str(cand).strip()
-        if not c:
-            continue
-        d = best(prod == c)
-        if d:
-            return d
-
-    # base PN match next (e.g., 150405-01 -> 150405)
-    for cand in allowed:
-        b = str(cand).strip().split("-", 1)[0]
-        if not b:
-            continue
-        d = best(prod.str.startswith(b))
-        if d:
-            return d
-
-    return ""
-
-
 def match_one_pn(installed_rows: pd.DataFrame, sn_lot_type: str):
-    """
-    Returns (qty_actual, ids_display_list)
-
-    SN: qty = unique serial count, ids = unique serials
-    LOT: qty = sum(Quantity) per lot, ids = ["LOT (xQ)", ...]
-    """
     if installed_rows is None or installed_rows.empty:
         return 0, []
 
@@ -214,92 +151,106 @@ def get_run_parent_serial_from_anchor(df: pd.DataFrame, anchor_pn: str) -> str:
     return parents.value_counts().idxmax()
 
 
+# ---------- Writers ----------
+
 def write_bom_xlsx(output_path: str, export_df: pd.DataFrame, results: list[dict], run_parent_serial: str):
     wb = Workbook()
 
-    # --- Sheet 1: Combined as built (FULL EXPORT) ---
+    # Sheet 1: Combined as built (FULL EXPORT)
     ws1 = wb.active
     ws1.title = "Combined as built"
     ws1.append(list(export_df.columns))
     for row in export_df.itertuples(index=False):
         ws1.append(list(row))
 
-    # --- Sheet 2: 44807 ---
+    # Sheet 2: 44807 (as-built desc)
     ws2 = wb.create_sheet("44807")
     ws2.append([
-        "PrimaryPartNo",
-        "MatchedPartNo",
-        "Component Description",
-        "SN/LOT",
-        "QTY Required",
-        "QTY Actual",
-        "IDs",
-        "Status",
+        "PrimaryPartNo", "MatchedPartNo", "Component Description", "SN/LOT",
+        "QTY Required", "QTY Actual", "IDs", "Status"
     ])
     for r in results:
         ws2.append([
-            r["primary_pn"],
-            r["matched_pn"],
-            r["description"],
-            r["snlot"],
-            r["qty_required"],
-            r["qty_actual"],
-            r["ids_text"],
-            r["status"],
+            r["primary_pn"], r["matched_pn"], r["description_44807"], r["snlot"],
+            r["qty_required"], r["qty_actual"], r["ids_text"], r["status"]
         ])
 
-    # --- Sheet 3: Vehicle intake (ONLY IDs that exist; NO missing lines; remove (xN)) ---
+    # Sheet 3: Vehicle intake
     ws3 = wb.create_sheet("Vehicle intake")
     ws3.append(["Parent Serial #", "Serial/Lot (from 44807)"])
-
     for r in results:
         if r["status"] == "NOT FOUND":
             continue
-
         ids_text = str(r.get("ids_text", "")).strip()
         if not ids_text:
             continue
-
         for line in ids_text.splitlines():
             clean = strip_lot_qty_suffix(line)
             if clean:
                 ws3.append([run_parent_serial, clean])
 
-    # --- Sheet 4: Missing Components (NOT FOUND + NOT SATISFIED) ---
+    # Sheet 4: Missing Components (template desc)
     ws4 = wb.create_sheet("Missing Components")
-    ws4.append([
-        "Parent Serial #",
-        "PartNo",
-        "Description",
-        "SN/LOT",
-        "QTY Required",
-        "QTY Actual",
-        "Missing Qty",
-        "Status",
-    ])
-
+    ws4.append(["Parent Serial #", "PartNo", "Description", "SN/LOT", "QTY Required", "QTY Actual", "Missing Qty", "Status"])
     for r in results:
         if r["status"] == "SATISFIED":
             continue
-
         req = int(r.get("qty_required", 0))
         act = int(r.get("qty_actual", 0))
         missing_qty = max(0, req - act)
-
         ws4.append([
-            run_parent_serial,
-            r.get("primary_pn", ""),
-            r.get("description", ""),
-            r.get("snlot", ""),
-            req,
-            act,
-            missing_qty,
-            r.get("status", ""),
+            run_parent_serial, r.get("primary_pn", ""), r.get("description_missing", ""),
+            r.get("snlot", ""), req, act, missing_qty, r.get("status", "")
         ])
 
     wb.save(output_path)
     print("Saved BOM:", output_path)
 
+
+def write_part_list_xlsx(output_path: str, results: list[dict], run_parent_serial: str):
+    """
+    {parent}_part_list.xlsx
+    Contains ONLY the Vehicle intake worksheet.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Vehicle intake"
+    ws.append(["Parent Serial #", "Serial/Lot (from 44807)"])
+
+    for r in results:
+        if r["status"] == "NOT FOUND":
+            continue
+        ids_text = str(r.get("ids_text", "")).strip()
+        if not ids_text:
+            continue
+        for line in ids_text.splitlines():
+            clean = strip_lot_qty_suffix(line)
+            if clean:
+                ws.append([run_parent_serial, clean])
+
+    wb.save(output_path)
+    print("Saved Part List:", output_path)
+
+
+def write_registration_xlsx(output_path: str, run_parent_serial: str):
+    """
+    {parent}_registration.xlsx
+    Placeholder for now — you’ll tell me the required fields later.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Registration"
+
+    # Minimal placeholder rows so file is valid/useful
+    ws.append(["Field", "Value"])
+    ws.append(["Parent Serial #", run_parent_serial])
+    ws.append(["Tail Number", ""])  # fill later when you define where it comes from
+
+    wb.save(output_path)
+    print("Saved Registration:", output_path)
+
+
+# ---------- Main ----------
 
 if __name__ == "__main__":
     os.makedirs("outputs", exist_ok=True)
@@ -316,6 +267,7 @@ if __name__ == "__main__":
         print("Available columns:", list(df.columns))
         raise SystemExit(1)
 
+    # Anchor parent serial using PN LBL-F5-01 (your current method)
     ANCHOR_PN = "LBL-F5-01"
     run_parent_serial = get_run_parent_serial_from_anchor(df, ANCHOR_PN)
     print("Run Parent Serial (from anchor):", run_parent_serial)
@@ -337,15 +289,7 @@ if __name__ == "__main__":
         rows_for_match = installed_by_pn.get(matched_pn) if matched_pn else None
 
         qty_act, ids_display = match_one_pn(rows_for_match, snlot)
-
         export_desc = pick_description_from_export(rows_for_match)
-
-        if matched_pn == "":
-            # NOT FOUND: use the missing PN to pull description from Combined as built
-            desc = pick_description_from_combined(df, primary_pn, aliases)
-        else:
-            # Found/not satisfied: prefer matched rows, fallback to template
-            desc = export_desc if export_desc else template_desc
 
         if matched_pn == "":
             status = "NOT FOUND"
@@ -354,10 +298,17 @@ if __name__ == "__main__":
         else:
             status = "SATISFIED" if qty_act >= qty_req else "NOT SATISFIED"
 
+        # 44807 description = export first (as-built), fallback template
+        description_44807 = export_desc if export_desc else template_desc
+
+        # Missing description = template master (what SHOULD have been there)
+        description_missing = template_desc
+
         results.append({
             "primary_pn": primary_pn,
             "matched_pn": matched_pn,
-            "description": desc,
+            "description_44807": description_44807,
+            "description_missing": description_missing,
             "snlot": snlot,
             "qty_required": qty_req,
             "qty_actual": int(qty_act),
@@ -365,7 +316,13 @@ if __name__ == "__main__":
             "status": status,
         })
 
+    # Write outputs
     bom_path = f"outputs/{run_parent_serial}_BOM.xlsx"
+    part_list_path = f"outputs/{run_parent_serial}_part_list.xlsx"
+    reg_path = f"outputs/{run_parent_serial}_registration.xlsx"
+
     write_bom_xlsx(bom_path, df, results, run_parent_serial)
+    write_part_list_xlsx(part_list_path, results, run_parent_serial)
+    write_registration_xlsx(reg_path, run_parent_serial)
 
     print("Done.")
