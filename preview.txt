@@ -1,4 +1,6 @@
 Total requirements: 89
+Run Parent Serial (from anchor): 1786501092
 Unique ProductNo count: 111
 Aliases loaded: 20
-Saved: outputs/required_parts.xlsx
+Saved BOM: outputs/1786501092_BOM.xlsx
+Done.
