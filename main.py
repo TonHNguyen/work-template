@@ -4,7 +4,7 @@ import os
 import re
 
 TEMPLATE_PATH = "templates/template.xlsx"
-EXPORT_PATH = "data/export_all_c80eb8e5ef3040379d61be5c46e8cd83.xlsx"
+EXPORT_PATH = "data/export_all_eaf5795d66e942029106c4a2a7df8bb6.xlsx"
 ALIASES_PATH = "data/aliases.xlsx"
 
 
@@ -39,7 +39,27 @@ def strip_lot_qty_suffix(s: str) -> str:
     return re.sub(r"\s*\(x\d+\)\s*$", "", str(s).strip())
 
 
+def allocate_sn_ids(available_ids: list[str], qty_required: int) -> list[str]:
+    """
+    Consume qty_required IDs from available_ids (in place) and return the taken list.
+    """
+    taken = []
+    for _ in range(max(0, int(qty_required))):
+        if not available_ids:
+            break
+        taken.append(available_ids.pop(0))
+    return taken
+
+
 def read_requirements():
+    """
+    Template tab 44807:
+      A: Part number
+      B: Description (master for missing sheet)
+      C: Qty required
+      E: SN/LOT
+    Returns: list[(primary_pn, template_desc, qty_required, snlot)]
+    """
     wb = load_workbook(TEMPLATE_PATH, keep_vba=True, data_only=True)
     ws = wb["44807"]
 
@@ -72,6 +92,12 @@ def load_export():
 
 
 def load_aliases():
+    """
+    Aliases workbook:
+      First sheet only
+      Column A: PrimaryPartNo
+      Columns B..N: alternates
+    """
     df = pd.read_excel(ALIASES_PATH, sheet_name=0, dtype=str).fillna("")
     aliases = {}
 
@@ -112,6 +138,12 @@ def pick_description_from_export(rows_for_match: pd.DataFrame) -> str:
 
 
 def match_one_pn(installed_rows: pd.DataFrame, sn_lot_type: str):
+    """
+    Returns (qty_actual, ids_display_list)
+
+    SN: qty = unique serial count, ids = unique serials
+    LOT: qty = sum(Quantity) per lot, ids = ["LOT (xQ)", ...]
+    """
     if installed_rows is None or installed_rows.empty:
         return 0, []
 
@@ -120,6 +152,7 @@ def match_one_pn(installed_rows: pd.DataFrame, sn_lot_type: str):
         uniq = sorted(set(ids))
         return len(uniq), uniq
 
+    # LOT
     lot_mask = installed_rows["Lot #"].astype(str).str.strip() != ""
     lot_rows = installed_rows[lot_mask].copy()
     if lot_rows.empty:
@@ -163,7 +196,7 @@ def write_bom_xlsx(output_path: str, export_df: pd.DataFrame, results: list[dict
     for row in export_df.itertuples(index=False):
         ws1.append(list(row))
 
-    # Sheet 2: 44807 (as-built desc)
+    # Sheet 2: 44807
     ws2 = wb.create_sheet("44807")
     ws2.append([
         "PrimaryPartNo", "MatchedPartNo", "Component Description", "SN/LOT",
@@ -175,7 +208,7 @@ def write_bom_xlsx(output_path: str, export_df: pd.DataFrame, results: list[dict
             r["qty_required"], r["qty_actual"], r["ids_text"], r["status"]
         ])
 
-    # Sheet 3: Vehicle intake
+    # Sheet 3: Vehicle intake (ONLY IDs that exist; strip (xN))
     ws3 = wb.create_sheet("Vehicle intake")
     ws3.append(["Parent Serial #", "Serial/Lot (from 44807)"])
     for r in results:
@@ -189,7 +222,7 @@ def write_bom_xlsx(output_path: str, export_df: pd.DataFrame, results: list[dict
             if clean:
                 ws3.append([run_parent_serial, clean])
 
-    # Sheet 4: Missing Components (template desc)
+    # Sheet 4: Missing Components
     ws4 = wb.create_sheet("Missing Components")
     ws4.append(["Parent Serial #", "PartNo", "Description", "SN/LOT", "QTY Required", "QTY Actual", "Missing Qty", "Status"])
     for r in results:
@@ -235,17 +268,14 @@ def write_part_list_xlsx(output_path: str, results: list[dict], run_parent_seria
 def write_registration_xlsx(output_path: str, run_parent_serial: str):
     """
     {parent}_registration.xlsx
-    Placeholder for now — you’ll tell me the required fields later.
+    Placeholder for now.
     """
     wb = Workbook()
     ws = wb.active
     ws.title = "Registration"
-
-    # Minimal placeholder rows so file is valid/useful
     ws.append(["Field", "Value"])
     ws.append(["Parent Serial #", run_parent_serial])
-    ws.append(["Tail Number", ""])  # fill later when you define where it comes from
-
+    ws.append(["Tail Number", ""])  # fill later
     wb.save(output_path)
     print("Saved Registration:", output_path)
 
@@ -267,18 +297,21 @@ if __name__ == "__main__":
         print("Available columns:", list(df.columns))
         raise SystemExit(1)
 
-    # Anchor parent serial using PN LBL-F5-01 (your current method)
+    # Anchor parent serial using PN LBL-F5-01
     ANCHOR_PN = "LBL-F5-01"
     run_parent_serial = get_run_parent_serial_from_anchor(df, ANCHOR_PN)
     print("Run Parent Serial (from anchor):", run_parent_serial)
 
-    # Global matching (your working mode)
+    # Global matching (your current mode)
     df["ProductNo_clean"] = df["ProductNo"].astype(str).str.strip()
     installed_by_pn = {pn: g for pn, g in df.groupby("ProductNo_clean")}
     print("Unique ProductNo count:", len(installed_by_pn))
 
     aliases = load_aliases()
     print("Aliases loaded:", len(aliases))
+
+    # NEW: SN allocation pool (matched_pn -> remaining serials)
+    sn_pool = {}
 
     results = []
     for primary_pn, template_desc, qty_req, snlot in reqs:
@@ -288,7 +321,6 @@ if __name__ == "__main__":
         matched_pn = resolve_match_pn(primary_pn, installed_by_pn, aliases)
         rows_for_match = installed_by_pn.get(matched_pn) if matched_pn else None
 
-        qty_act, ids_display = match_one_pn(rows_for_match, snlot)
         export_desc = pick_description_from_export(rows_for_match)
 
         if matched_pn == "":
@@ -296,12 +328,26 @@ if __name__ == "__main__":
             qty_act = 0
             ids_display = []
         else:
+            # Start with normal matching
+            qty_act, ids_display = match_one_pn(rows_for_match, snlot)
+
+            # NEW: allocate SN serials across duplicate requirement lines
+            if snlot == "SN":
+                if matched_pn not in sn_pool:
+                    all_ids = [str(x).strip() for x in rows_for_match["Serial #"].tolist() if str(x).strip()]
+                    uniq = sorted(set(all_ids))
+                    sn_pool[matched_pn] = uniq
+
+                taken = allocate_sn_ids(sn_pool[matched_pn], qty_req)
+                ids_display = taken
+                qty_act = len(taken)
+
             status = "SATISFIED" if qty_act >= qty_req else "NOT SATISFIED"
 
-        # 44807 description = export first (as-built), fallback template
+        # 44807 description = export first, fallback template
         description_44807 = export_desc if export_desc else template_desc
 
-        # Missing description = template master (what SHOULD have been there)
+        # Missing description = template master
         description_missing = template_desc
 
         results.append({
@@ -316,7 +362,7 @@ if __name__ == "__main__":
             "status": status,
         })
 
-    # Write outputs
+    # Output files
     bom_path = f"outputs/{run_parent_serial}_BOM.xlsx"
     part_list_path = f"outputs/{run_parent_serial}_part_list.xlsx"
     reg_path = f"outputs/{run_parent_serial}_registration.xlsx"
