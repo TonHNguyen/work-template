@@ -4,39 +4,39 @@ import os
 import re
 
 TEMPLATE_PATH = "templates/template.xlsx"
-EXPORT_PATH = "data/export_all_eaf5795d66e942029106c4a2a7df8bb6.xlsx"
+EXPORT_PATH = "data/export_all_65c4618b186b4d068cc944cf7f28a71a.xlsx"
 ALIASES_PATH = "data/aliases.xlsx"
 
-
-def to_int_or_zero(v):
-    if v is None:
+#If cell has anything other than # - return to 0
+def to_int_or_zero(n):
+    if n is None:
         return 0
-    if isinstance(v, str):
-        s = v.strip()
-        if s == "" or s.startswith("#"):
+    if isinstance(n, str):
+        c = n.strip()
+        if c == "" or c.startswith("#"):
             return 0
         try:
-            return int(float(s))
+            return int(float(c))
         except ValueError:
             return 0
     try:
-        return int(v)
+        return int(n)
     except Exception:
         return 0
 
-
-def to_float_or_zero(v):
+#If cell has anything other than # - return to 0
+def to_float_or_zero(n):
     try:
-        s = str(v).strip()
-        if s == "" or s.startswith("#"):
+        c = str(n).strip()
+        if c == "" or n.startswith("#"):
             return 0.0
-        return float(s)
+        return float(c)
     except Exception:
         return 0.0
 
 
-def strip_lot_qty_suffix(s: str) -> str:
-    return re.sub(r"\s*\(x\d+\)\s*$", "", str(s).strip())
+def strip_lot_qty_suffix(c: str) -> str:
+    return re.sub(r"\s*\(x\d+\)\s*$", "", str(c).strip())
 
 
 def allocate_sn_ids(available_ids: list[str], qty_required: int) -> list[str]:
