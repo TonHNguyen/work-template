@@ -3,7 +3,9 @@
 #it will pull the data from the worksheet that you downloaded from APRISO's Genealogy Detail Lookup and output out the two required worksheets for HAWK
 #will keep updated and fix bug
 
-
+-*Need to update the alias with these numbers: 
+  150515-02 - 151425-01
+  150524-02 - 151430-01
 
 
 
