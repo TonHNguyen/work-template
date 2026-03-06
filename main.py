@@ -97,7 +97,10 @@ def main():
             "status":     status,
         })
 
-    # ── 4. Print summary ──────────────────────────────────────────────────────
+    # ── 4. Sort — SN rows first, LOT rows second (preserves order within each group)
+    results.sort(key=lambda r: 0 if r["snlot"] == "SN" else 1)
+
+    # ── 5. Print summary ──────────────────────────────────────────────────────
     counts = {s: sum(1 for r in results if r["status"] == s)
               for s in ("SATISFIED", "NOT SATISFIED", "OLD REV", "NOT FOUND")}
     print(f"\nSATISFIED    : {counts['SATISFIED']}")
@@ -105,7 +108,7 @@ def main():
     print(f"OLD REV      : {counts['OLD REV']}")
     print(f"NOT FOUND    : {counts['NOT FOUND']}")
 
-    # ── 5. Write output files ─────────────────────────────────────────────────
+    # ── 6. Write output files ─────────────────────────────────────────────────
     base = f"{OUTPUT_DIR}/{parent_serial}"
     write_bom(f"{base}_BOM.xlsx", df, results, parent_serial)
     write_part_list(f"{base}_part_list.xlsx", results, parent_serial)

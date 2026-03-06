@@ -5,30 +5,33 @@ All user-configurable settings in one place.
 Change paths, anchor PN, rev-sensitive parts, or PN overrides here — nowhere else.
 """
 
+import os
 from openpyxl.styles import PatternFill, Font
 
+# All paths are relative to THIS file's directory so the app works
+# regardless of which folder you run it from.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+def _path(*parts):
+    return os.path.join(_HERE, *parts)
+
 # ── File paths ────────────────────────────────────────────────────────────────
-TEMPLATE_PATH = "templates/DOC-012743.pdf"
-EXPORT_PATH   = "data/export_all_65c4618b186b4d068cc944cf7f28a71a.xlsx"
-OUTPUT_DIR    = "outputs"
+TEMPLATE_PATH = _path("templates", "DOC-012743.pdf")
+EXPORT_PATH   = _path("data", "export_all_c80eb8e5ef3040379d61be5c46e8cd83.xlsx")
+OUTPUT_DIR    = _path("outputs")
 
 # ── Anchor PN ─────────────────────────────────────────────────────────────────
-# Used to identify the drone's parent serial number from the export.
 ANCHOR_PN = "LBL-F5-01"
 
 # ── Rev-sensitive parts ───────────────────────────────────────────────────────
 # Only these base PNs require an exact revision match.
 # All other parts will use the highest available revision in the export.
-# Add more base PNs here as needed e.g. {"147712", "150393"}
 REV_SENSITIVE = {"147712"}
 
 # ── Manual PN overrides ───────────────────────────────────────────────────────
-# Parts that are NOT in the PDF yet but are valid replacements in the export.
-# Format:  "pdf_pn" -> ["replacement_pn_1", "replacement_pn_2", ...]
-#
-# The matcher tries the PDF PN first, then falls through to these in order.
-# To remove an override once the PDF is updated, just delete that line.
-#
+# Parts not yet in the PDF but valid replacements in the export.
+# Format:  "pdf_pn" -> ["replacement_pn_1", ...]
+# Delete a line once the PDF is updated.
 PN_OVERRIDES = {
     "159604-01": ["160275-02"],   # PROPELLER ASSY, T-MOTOR, 4-PLY, CENTER, CCW
     "159603-01": ["160274-02"],   # PROPELLER ASSY, T-MOTOR, 4-PLY, CENTER, CW
