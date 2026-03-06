@@ -1,374 +1,118 @@
-from openpyxl import load_workbook, Workbook
-import pandas as pd
+"""
+main.py
+-------
+Entry point. Run this file to process the BOM.
+
+    python main.py
+
+Output files are written to the outputs/ folder named after the drone's
+parent serial number:
+    {serial}_BOM.xlsx
+    {serial}_part_list.xlsx
+    {serial}_registration.xlsx
+"""
+
 import os
 import re
 
-TEMPLATE_PATH = "templates/template.xlsx"
-EXPORT_PATH = "data/export_all_65c4618b186b4d068cc944cf7f28a71a.xlsx"
-ALIASES_PATH = "data/aliases.xlsx"
-
-#If cell has anything other than # - return to 0
-def to_int_or_zero(n):
-    if n is None:
-        return 0
-    if isinstance(n, str):
-        c = n.strip()
-        if c == "" or c.startswith("#"):
-            return 0
-        try:
-            return int(float(c))
-        except ValueError:
-            return 0
-    try:
-        return int(n)
-    except Exception:
-        return 0
-
-#If cell has anything other than # - return to 0
-def to_float_or_zero(n):
-    try:
-        c = str(n).strip()
-        if c == "" or n.startswith("#"):
-            return 0.0
-        return float(c)
-    except Exception:
-        return 0.0
-
-
-def strip_lot_qty_suffix(c: str) -> str:
-    return re.sub(r"\s*\(x\d+\)\s*$", "", str(c).strip())
-
-
-def allocate_sn_ids(available_ids: list[str], qty_required: int) -> list[str]:
-    """
-    Consume qty_required IDs from available_ids (in place) and return the taken list.
-    """
-    taken = []
-    for _ in range(max(0, int(qty_required))):
-        if not available_ids:
-            break
-        taken.append(available_ids.pop(0))
-    return taken
-
-
-def read_requirements():
-    """
-    Template tab 44807:
-      A: Part number
-      B: Description (master for missing sheet)
-      C: Qty required
-      E: SN/LOT
-    Returns: list[(primary_pn, template_desc, qty_required, snlot)]
-    """
-    wb = load_workbook(TEMPLATE_PATH, keep_vba=True, data_only=True)
-    ws = wb["44807"]
-
-    requirements = []
-    row = 2
-    while True:
-        pn = ws[f"A{row}"].value
-        if pn is None or str(pn).strip() == "":
-            break
-
-        primary_pn = str(pn).strip()
-
-        template_desc = ws[f"B{row}"].value
-        template_desc = str(template_desc).strip() if template_desc else ""
-
-        qty_required = to_int_or_zero(ws[f"C{row}"].value)
-
-        sn_lot = ws[f"E{row}"].value
-        sn_lot = str(sn_lot).strip().upper() if sn_lot else ""
-        sn_lot = sn_lot if sn_lot in ("SN", "LOT") else "SN"
-
-        requirements.append((primary_pn, template_desc, qty_required, sn_lot))
-        row += 1
-
-    return requirements
-
-
-def load_export():
-    return pd.read_excel(EXPORT_PATH, dtype=str).fillna("")
-
-
-def load_aliases():
-    """
-    Aliases workbook:
-      First sheet only
-      Column A: PrimaryPartNo
-      Columns B..N: alternates
-    """
-    df = pd.read_excel(ALIASES_PATH, sheet_name=0, dtype=str).fillna("")
-    aliases = {}
-
-    for _, row in df.iterrows():
-        primary = str(row.iloc[0]).strip()
-        if not primary:
-            continue
-
-        allowed = [primary]
-        for v in row.iloc[1:]:
-            v = str(v).strip()
-            if v:
-                allowed.append(v)
-
-        seen = set()
-        allowed = [x for x in allowed if not (x in seen or seen.add(x))]
-        aliases[primary] = allowed
-
-    return aliases
-
-
-def resolve_match_pn(primary_pn: str, installed_by_pn: dict, aliases: dict):
-    allowed = aliases.get(primary_pn, [primary_pn])
-    for candidate in allowed:
-        if candidate in installed_by_pn:
-            return candidate
-    return ""
-
-
-def pick_description_from_export(rows_for_match: pd.DataFrame) -> str:
-    if rows_for_match is None or rows_for_match.empty:
-        return ""
-    s = rows_for_match["Component Description"].astype(str).str.strip()
-    s = s[s != ""]
-    if s.empty:
-        return ""
-    return s.value_counts().idxmax()
-
-
-def match_one_pn(installed_rows: pd.DataFrame, sn_lot_type: str):
-    """
-    Returns (qty_actual, ids_display_list)
-
-    SN: qty = unique serial count, ids = unique serials
-    LOT: qty = sum(Quantity) per lot, ids = ["LOT (xQ)", ...]
-    """
-    if installed_rows is None or installed_rows.empty:
-        return 0, []
-
-    if sn_lot_type == "SN":
-        ids = [str(x).strip() for x in installed_rows["Serial #"].tolist() if str(x).strip()]
-        uniq = sorted(set(ids))
-        return len(uniq), uniq
-
-    # LOT
-    lot_mask = installed_rows["Lot #"].astype(str).str.strip() != ""
-    lot_rows = installed_rows[lot_mask].copy()
-    if lot_rows.empty:
-        return 0, []
-
-    lot_rows["Lot_clean"] = lot_rows["Lot #"].astype(str).str.strip()
-    lot_rows["Qty_num"] = lot_rows["Quantity"].apply(to_float_or_zero)
-
-    per_lot = lot_rows.groupby("Lot_clean")["Qty_num"].sum()
-
-    qty_actual = int(per_lot.sum())
-    display = [f"{lot} (x{int(q)})" for lot, q in per_lot.items()]
-    return qty_actual, display
-
-
-def get_run_parent_serial_from_anchor(df: pd.DataFrame, anchor_pn: str) -> str:
-    pn_clean = df["ProductNo"].astype(str).str.strip()
-    anchor_rows = df[pn_clean == anchor_pn]
-
-    if anchor_rows.empty:
-        raise ValueError(f"Anchor PN '{anchor_pn}' not found in export.")
-
-    parents = anchor_rows["Parent Serial #"].astype(str).str.strip()
-    parents = parents[parents != ""]
-
-    if parents.empty:
-        raise ValueError(f"Anchor PN '{anchor_pn}' has no Parent Serial # values.")
-
-    return parents.value_counts().idxmax()
-
-
-# ---------- Writers ----------
-
-def write_bom_xlsx(output_path: str, export_df: pd.DataFrame, results: list[dict], run_parent_serial: str):
-    wb = Workbook()
-
-    # Sheet 1: Combined as built (FULL EXPORT)
-    ws1 = wb.active
-    ws1.title = "Combined as built"
-    ws1.append(list(export_df.columns))
-    for row in export_df.itertuples(index=False):
-        ws1.append(list(row))
-
-    # Sheet 2: 44807
-    ws2 = wb.create_sheet("44807")
-    ws2.append([
-        "PrimaryPartNo", "MatchedPartNo", "Component Description", "SN/LOT",
-        "QTY Required", "QTY Actual", "IDs", "Status"
-    ])
-    for r in results:
-        ws2.append([
-            r["primary_pn"], r["matched_pn"], r["description_44807"], r["snlot"],
-            r["qty_required"], r["qty_actual"], r["ids_text"], r["status"]
-        ])
-
-    # Sheet 3: Vehicle intake (ONLY IDs that exist; strip (xN))
-    ws3 = wb.create_sheet("Vehicle intake")
-    ws3.append(["Parent Serial #", "Serial/Lot (from 44807)"])
-    for r in results:
-        if r["status"] == "NOT FOUND":
-            continue
-        ids_text = str(r.get("ids_text", "")).strip()
-        if not ids_text:
-            continue
-        for line in ids_text.splitlines():
-            clean = strip_lot_qty_suffix(line)
-            if clean:
-                ws3.append([run_parent_serial, clean])
-
-    # Sheet 4: Missing Components
-    ws4 = wb.create_sheet("Missing Components")
-    ws4.append(["Parent Serial #", "PartNo", "Description", "SN/LOT", "QTY Required", "QTY Actual", "Missing Qty", "Status"])
-    for r in results:
-        if r["status"] == "SATISFIED":
-            continue
-        req = int(r.get("qty_required", 0))
-        act = int(r.get("qty_actual", 0))
-        missing_qty = max(0, req - act)
-        ws4.append([
-            run_parent_serial, r.get("primary_pn", ""), r.get("description_missing", ""),
-            r.get("snlot", ""), req, act, missing_qty, r.get("status", "")
-        ])
-
-    wb.save(output_path)
-    print("Saved BOM:", output_path)
-
-
-def write_part_list_xlsx(output_path: str, results: list[dict], run_parent_serial: str):
-    """
-    {parent}_part_list.xlsx
-    Contains ONLY the Vehicle intake worksheet.
-    """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Vehicle intake"
-    ws.append(["Parent Serial #", "Serial/Lot (from 44807)"])
-
-    for r in results:
-        if r["status"] == "NOT FOUND":
-            continue
-        ids_text = str(r.get("ids_text", "")).strip()
-        if not ids_text:
-            continue
-        for line in ids_text.splitlines():
-            clean = strip_lot_qty_suffix(line)
-            if clean:
-                ws.append([run_parent_serial, clean])
-
-    wb.save(output_path)
-    print("Saved Part List:", output_path)
-
-
-def write_registration_xlsx(output_path: str, run_parent_serial: str):
-    """
-    {parent}_registration.xlsx
-    Placeholder for now.
-    """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Registration"
-    ws.append(["Field", "Value"])
-    ws.append(["Parent Serial #", run_parent_serial])
-    ws.append(["Tail Number", ""])  # fill later
-    wb.save(output_path)
-    print("Saved Registration:", output_path)
-
-
-# ---------- Main ----------
-
-if __name__ == "__main__":
-    os.makedirs("outputs", exist_ok=True)
-
-    reqs = read_requirements()
-    print("Total requirements:", len(reqs))
-
-    df = load_export()
-
-    needed_cols = ["ProductNo", "Serial #", "Lot #", "Component Description", "Quantity", "Parent Serial #"]
-    missing_cols = [c for c in needed_cols if c not in df.columns]
-    if missing_cols:
-        print("ERROR: export missing columns:", missing_cols)
-        print("Available columns:", list(df.columns))
-        raise SystemExit(1)
-
-    # Anchor parent serial using PN LBL-F5-01
-    ANCHOR_PN = "LBL-F5-01"
-    run_parent_serial = get_run_parent_serial_from_anchor(df, ANCHOR_PN)
-    print("Run Parent Serial (from anchor):", run_parent_serial)
-
-    # Global matching (your current mode)
-    df["ProductNo_clean"] = df["ProductNo"].astype(str).str.strip()
-    installed_by_pn = {pn: g for pn, g in df.groupby("ProductNo_clean")}
-    print("Unique ProductNo count:", len(installed_by_pn))
-
-    aliases = load_aliases()
-    print("Aliases loaded:", len(aliases))
-
-    # NEW: SN allocation pool (matched_pn -> remaining serials)
+from config     import TEMPLATE_PATH, EXPORT_PATH, OUTPUT_DIR
+from pdf_parser import read_pdf
+from matcher    import (load_export, get_parent_serial,
+                        find_match, find_old_rev,
+                        get_best_desc, detect_snlot,
+                        allocate_sns, allocate_lots)
+from writers    import write_bom, write_part_list, write_registration
+from utils      import to_int
+
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # ── 1. Parse PDF template ─────────────────────────────────────────────────
+    print("Reading PDF template …")
+    parts, aliases = read_pdf(TEMPLATE_PATH)
+    print(f"Total parts to check: {len(parts)}")
+
+    # ── 2. Load export ────────────────────────────────────────────────────────
+    df            = load_export(EXPORT_PATH)
+    parent_serial = get_parent_serial(df)
+    installed     = {pn: grp for pn, grp in df.groupby("ProductNo")}
+    print(f"Parent Serial       : {parent_serial}")
+    print(f"Unique PNs in export: {len(installed)}\n")
+
+    # ── 3. Match each part ────────────────────────────────────────────────────
     sn_pool = {}
-
     results = []
-    for primary_pn, template_desc, qty_req, snlot in reqs:
+
+    for part in parts:
+        qty_req = part["qty"]
         if qty_req == 0:
             continue
 
-        matched_pn = resolve_match_pn(primary_pn, installed_by_pn, aliases)
-        rows_for_match = installed_by_pn.get(matched_pn) if matched_pn else None
+        matched = find_match(part, installed)
 
-        export_desc = pick_description_from_export(rows_for_match)
+        if matched:
+            rows     = installed[matched]
+            exp_desc = get_best_desc(rows)
+            snlot    = detect_snlot(rows)
 
-        if matched_pn == "":
-            status = "NOT FOUND"
-            qty_act = 0
-            ids_display = []
-        else:
-            # Start with normal matching
-            qty_act, ids_display = match_one_pn(rows_for_match, snlot)
-
-            # NEW: allocate SN serials across duplicate requirement lines
             if snlot == "SN":
-                if matched_pn not in sn_pool:
-                    all_ids = [str(x).strip() for x in rows_for_match["Serial #"].tolist() if str(x).strip()]
-                    uniq = sorted(set(all_ids))
-                    sn_pool[matched_pn] = uniq
-
-                taken = allocate_sn_ids(sn_pool[matched_pn], qty_req)
-                ids_display = taken
-                qty_act = len(taken)
+                ids     = allocate_sns(rows, qty_req, sn_pool, matched)
+                qty_act = len(ids)
+            else:
+                ids     = allocate_lots(rows)
+                qty_act = sum(
+                    to_int(m.group(1))
+                    for s in ids
+                    if (m := re.search(r"\(x(\d+)\)", s))
+                )
 
             status = "SATISFIED" if qty_act >= qty_req else "NOT SATISFIED"
 
-        # 44807 description = export first, fallback template
-        description_44807 = export_desc if export_desc else template_desc
+        else:
+            old_pn = find_old_rev(part["preferred"], installed)
 
-        # Missing description = template master
-        description_missing = template_desc
+            if old_pn:
+                rows     = installed[old_pn]
+                exp_desc = get_best_desc(rows)
+                snlot    = detect_snlot(rows)
+                ids      = (allocate_sns(rows, qty_req, sn_pool, old_pn)
+                            if snlot == "SN" else allocate_lots(rows))
+                qty_act  = len(ids)
+                matched  = old_pn
+                status   = "OLD REV"
+                print(f"  [OLD REV] {part['preferred']}  →  found {old_pn}")
+            else:
+                ids, qty_act, exp_desc, snlot = [], 0, "", "SN"
+                status = "NOT FOUND"
 
         results.append({
-            "primary_pn": primary_pn,
-            "matched_pn": matched_pn,
-            "description_44807": description_44807,
-            "description_missing": description_missing,
-            "snlot": snlot,
-            "qty_required": qty_req,
-            "qty_actual": int(qty_act),
-            "ids_text": "\n".join(ids_display),
-            "status": status,
+            "pn":         part["preferred"],
+            "matched_pn": matched,
+            "desc":       exp_desc or part["desc"],
+            "snlot":      snlot,
+            "qty_req":    qty_req,
+            "qty_act":    qty_act,
+            "ids_text":   "\n".join(ids),
+            "status":     status,
         })
 
-    # Output files
-    bom_path = f"outputs/{run_parent_serial}_BOM.xlsx"
-    part_list_path = f"outputs/{run_parent_serial}_part_list.xlsx"
-    reg_path = f"outputs/{run_parent_serial}_registration.xlsx"
+    # ── 4. Print summary ──────────────────────────────────────────────────────
+    counts = {s: sum(1 for r in results if r["status"] == s)
+              for s in ("SATISFIED", "NOT SATISFIED", "OLD REV", "NOT FOUND")}
+    print(f"\nSATISFIED    : {counts['SATISFIED']}")
+    print(f"NOT SATISFIED: {counts['NOT SATISFIED']}")
+    print(f"OLD REV      : {counts['OLD REV']}")
+    print(f"NOT FOUND    : {counts['NOT FOUND']}")
 
-    write_bom_xlsx(bom_path, df, results, run_parent_serial)
-    write_part_list_xlsx(part_list_path, results, run_parent_serial)
-    write_registration_xlsx(reg_path, run_parent_serial)
+    # ── 5. Write output files ─────────────────────────────────────────────────
+    base = f"{OUTPUT_DIR}/{parent_serial}"
+    write_bom(f"{base}_BOM.xlsx", df, results, parent_serial)
+    write_part_list(f"{base}_part_list.xlsx", results, parent_serial)
+    write_registration(f"{base}_registration.xlsx", parent_serial)
 
-    print("Done.")
+    print("\nDone.")
+
+
+if __name__ == "__main__":
+    main()
